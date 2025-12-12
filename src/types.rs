@@ -10,8 +10,9 @@ use derive_builder::Builder;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive as _;
 use rust_decimal_macros::dec;
+use serde::de::Visitor;
 use serde::ser::{Error as _, SerializeStruct as _};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 use serde_with::{
     DefaultOnNull, DisplayFromStr, FromInto, TimestampMilliSeconds, TimestampSeconds, serde_as,
@@ -56,28 +57,18 @@ pub enum OrderType {
 
 #[non_exhaustive]
 #[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    Display,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
-    Serialize,
-    Deserialize,
+    Clone, Copy, Debug, Display, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
 )]
 #[serde(rename_all = "UPPERCASE")]
 #[strum(serialize_all = "UPPERCASE")]
 #[repr(u8)]
 pub enum Side {
-    #[default]
     #[serde(alias = "buy")]
     Buy = 0,
     #[serde(alias = "sell")]
     Sell = 1,
+    #[serde(other)]
+    Unknown = 255,
 }
 
 impl TryFrom<u8> for Side {
@@ -331,7 +322,7 @@ pub struct MidpointsResponse {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Default, Serialize, Builder)]
+#[derive(Debug, Serialize, Builder)]
 #[builder(pattern = "owned", build_fn(error = "Error"))]
 #[builder(setter(into))]
 pub struct PriceRequest {
@@ -556,6 +547,7 @@ pub struct Token {
     pub token_id: String,
     pub outcome: String,
     pub price: Decimal,
+    #[serde(default)]
     pub winner: bool,
 }
 
@@ -813,7 +805,7 @@ pub struct NotificationResponse {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Default, Clone, Serialize, Deserialize, Builder, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Builder, PartialEq)]
 #[builder(pattern = "owned", build_fn(error = "Error"))]
 pub struct NotificationPayload {
     #[builder(setter(into))]
@@ -1057,7 +1049,7 @@ pub struct MakerOrder {
 #[derive(Debug, Clone, Deserialize, Builder, PartialEq)]
 #[builder(pattern = "owned", build_fn(error = "Error"))]
 pub struct UserEarningResponse {
-    pub date: DateTime<Utc>,
+    pub date: NaiveDate,
     #[builder(setter(into))]
     pub condition_id: String,
     pub asset_address: Address,
@@ -1070,7 +1062,7 @@ pub struct UserEarningResponse {
 #[derive(Debug, Clone, Deserialize, Builder, PartialEq)]
 #[builder(pattern = "owned", build_fn(error = "Error"))]
 pub struct TotalUserEarningResponse {
-    pub date: DateTime<Utc>,
+    pub date: NaiveDate,
     pub asset_address: Address,
     pub maker_address: Address,
     pub earnings: Decimal,
@@ -1142,10 +1134,26 @@ pub struct UserRewardsEarningResponse {
 #[builder(pattern = "owned", build_fn(error = "Error"))]
 pub struct RewardsConfig {
     pub asset_address: Address,
-    pub start_date: DateTime<Utc>,
-    pub end_date: DateTime<Utc>,
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
     pub rate_per_day: Decimal,
     pub total_rewards: Decimal,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize, Builder, PartialEq)]
+#[builder(pattern = "owned", build_fn(error = "Error"))]
+pub struct MarketRewardsConfig {
+    #[builder(setter(into))]
+    // We sometimes get numbers or strings back
+    #[serde(deserialize_with = "string_from_number_or_string")]
+    pub id: String,
+    pub asset_address: Address,
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
+    pub rate_per_day: Decimal,
+    pub total_rewards: Decimal,
+    pub total_days: Decimal,
 }
 
 #[non_exhaustive]
@@ -1158,6 +1166,21 @@ pub struct Earning {
 }
 
 pub type RewardsPercentagesResponse = HashMap<String, Decimal>;
+
+#[non_exhaustive]
+#[serde_as]
+#[derive(Debug, Clone, Deserialize, Builder, PartialEq)]
+#[builder(pattern = "owned", build_fn(error = "Error"))]
+pub struct CurrentRewardResponse {
+    #[builder(setter(into))]
+    pub condition_id: String,
+    #[builder(default)]
+    #[serde(default)]
+    #[serde_as(deserialize_as = "DefaultOnNull")]
+    pub rewards_config: Vec<RewardsConfig>,
+    pub rewards_max_spread: Decimal,
+    pub rewards_min_size: Decimal,
+}
 
 #[non_exhaustive]
 #[serde_as]
@@ -1176,6 +1199,7 @@ pub struct MarketRewardResponse {
     pub image: String,
     pub rewards_max_spread: Decimal,
     pub rewards_min_size: Decimal,
+    pub market_competitiveness: Decimal,
     #[builder(default)]
     #[serde(default)]
     #[serde_as(deserialize_as = "DefaultOnNull")]
@@ -1183,7 +1207,24 @@ pub struct MarketRewardResponse {
     #[builder(default)]
     #[serde(default)]
     #[serde_as(deserialize_as = "DefaultOnNull")]
-    pub rewards_config: Vec<RewardsConfig>,
+    pub rewards_config: Vec<MarketRewardsConfig>,
+}
+
+#[non_exhaustive]
+#[serde_as]
+#[derive(Debug, Clone, Deserialize, Builder, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[builder(pattern = "owned", build_fn(error = "Error"))]
+pub struct BuilderApiKeyResponse {
+    pub key: ApiKey,
+    #[builder(default)]
+    #[builder(setter(strip_option))]
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    #[builder(default)]
+    #[builder(setter(strip_option))]
+    #[serde(default)]
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 #[non_exhaustive]
@@ -1257,6 +1298,51 @@ fn format_params_with_cursor(params: &str, next_cursor: Option<&String>) -> Stri
         (params, Some(cursor)) => format!("?{params}&next_cursor={cursor}"),
         (params, None) => format!("?{params}"),
     }
+}
+
+fn string_from_number_or_string<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct StringOrNumberVisitor;
+
+    impl Visitor<'_> for StringOrNumberVisitor {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("string or integer")
+        }
+
+        fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(v.to_owned())
+        }
+
+        fn visit_string<E>(self, v: String) -> std::result::Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(v)
+        }
+
+        fn visit_i64<E>(self, v: i64) -> std::result::Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(v.to_string())
+        }
+
+        fn visit_u64<E>(self, v: u64) -> std::result::Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(v.to_string())
+        }
+    }
+
+    deserializer.deserialize_any(StringOrNumberVisitor)
 }
 
 #[cfg(test)]
