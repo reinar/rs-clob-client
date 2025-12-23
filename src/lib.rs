@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod clob;
 pub mod error;
+pub mod gamma;
 pub mod order_builder;
 pub mod types;
 
