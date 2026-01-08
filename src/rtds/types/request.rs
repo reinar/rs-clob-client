@@ -139,13 +139,8 @@ impl Serialize for Subscription {
         map.serialize_entry("type", &self.msg_type)?;
 
         if let Some(filters) = &self.filters {
-            // Parse filters as JSON value to emit raw JSON, not escaped string
-            if let Ok(json_value) = serde_json::from_str::<Value>(filters) {
-                map.serialize_entry("filters", &json_value)?;
-            } else {
-                // Fallback: emit as string if not valid JSON
-                map.serialize_entry("filters", filters)?;
-            }
+            // Emit filters as a string - the RTDS server expects a JSON-encoded string
+            map.serialize_entry("filters", filters)?;
         }
 
         // SECURITY: Credentials are intentionally revealed here for the WebSocket auth protocol.
