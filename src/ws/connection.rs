@@ -158,20 +158,18 @@ where
         let mut attempt = 0_u32;
         let mut backoff: backoff::ExponentialBackoff = config.reconnect.clone().into();
 
-        const MIN_STABLE_CONNECTION_SECS: u64 = 5;
-
         loop {
             let state_rx = state_tx.subscribe();
 
             _ = state_tx.send(ConnectionState::Connecting);
 
-            let connection_start = Instant::now();
-
             // Attempt connection
             match connect_async(&endpoint).await {
                 Ok((ws_stream, _)) => {
+                    attempt = 0;
+                    backoff.reset();
                     _ = state_tx.send(ConnectionState::Connected {
-                        since: connection_start,
+                        since: Instant::now(),
                     });
 
                     // Handle connection
@@ -189,15 +187,6 @@ where
                         tracing::error!("Error handling connection: {e:?}");
                         #[cfg(not(feature = "tracing"))]
                         let _ = &e;
-                    }
-
-                    // Only reset backoff if connection was stable (lasted > MIN_STABLE_CONNECTION_SECS)
-                    // This prevents rapid reconnection loops when server immediately rejects after handshake
-                    if connection_start.elapsed().as_secs() >= MIN_STABLE_CONNECTION_SECS {
-                        attempt = 0;
-                        backoff.reset();
-                    } else {
-                        attempt = attempt.saturating_add(1);
                     }
                 }
                 Err(e) => {
