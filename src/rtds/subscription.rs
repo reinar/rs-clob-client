@@ -87,7 +87,7 @@ impl SubscriptionManager {
 
         tokio::spawn(async move {
             let mut state_rx = this.connection.state_receiver();
-            let mut was_connected = state_rx.borrow().is_connected();
+            let mut prev_state = *state_rx.borrow();
 
             loop {
                 // Wait for next state change
@@ -98,24 +98,27 @@ impl SubscriptionManager {
 
                 let state = *state_rx.borrow_and_update();
 
-                match state {
-                    ConnectionState::Connected { .. } => {
-                        if was_connected {
-                            // Reconnect to subscriptions
-                            #[cfg(feature = "tracing")]
-                            tracing::debug!("RTDS reconnected, re-establishing subscriptions");
-                            this.resubscribe_all();
-                        }
-                        was_connected = true;
-                    }
-                    ConnectionState::Disconnected => {
-                        // Connection permanently closed
-                        break;
-                    }
-                    _ => {
-                        // Other states are no-op
-                    }
+                // Detect transition from non-connected to connected (reconnection)
+                let was_disconnected = !prev_state.is_connected();
+                let now_connected = state.is_connected();
+
+                if was_disconnected && now_connected {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!("RTDS reconnected, re-establishing subscriptions");
+
+                    // Clear stale topic tracking before resubscribing
+                    // (resubscribe_all rebuilds from active_subs)
+                    this.subscribed_topics.clear();
+
+                    this.resubscribe_all();
                 }
+
+                if matches!(state, ConnectionState::Disconnected) {
+                    // Connection permanently closed
+                    break;
+                }
+
+                prev_state = state;
             }
         });
     }

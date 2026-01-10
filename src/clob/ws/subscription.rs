@@ -104,7 +104,7 @@ impl SubscriptionManager {
 
         tokio::spawn(async move {
             let mut state_rx = this.connection.state_receiver();
-            let mut was_connected = state_rx.borrow().is_connected();
+            let mut prev_state = *state_rx.borrow();
 
             loop {
                 // Wait for next state change
@@ -115,41 +115,61 @@ impl SubscriptionManager {
 
                 let state = *state_rx.borrow_and_update();
 
-                match state {
-                    ConnectionState::Connected { .. } => {
-                        if was_connected {
-                            // Reconnect to subscriptions
-                            #[cfg(feature = "tracing")]
-                            tracing::debug!("WebSocket reconnected, re-establishing subscriptions");
-                            this.resubscribe_all();
-                        }
-                        was_connected = true;
-                    }
-                    ConnectionState::Disconnected => {
-                        // Connection permanently closed
-                        break;
-                    }
-                    _ => {
-                        // Other states are no-op
-                    }
+                // Detect transition from non-connected to connected (reconnection)
+                let was_disconnected = !prev_state.is_connected();
+                let now_connected = state.is_connected();
+
+                if was_disconnected && now_connected {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!("WebSocket reconnected, re-establishing subscriptions");
+
+                    // Clear stale reference counts before resubscribing
+                    // (resubscribe_all rebuilds from active_subs)
+                    this.subscribed_assets.clear();
+                    this.subscribed_markets.clear();
+
+                    this.resubscribe_all();
                 }
+
+                if matches!(state, ConnectionState::Disconnected) {
+                    // Connection permanently closed
+                    break;
+                }
+
+                prev_state = state;
             }
         });
     }
 
     /// Re-send subscription requests for all tracked assets and markets.
+    ///
+    /// This rebuilds subscriptions from `active_subs` which stores the canonical
+    /// subscription info. Call this after clearing `subscribed_assets`/`subscribed_markets`
+    /// to ensure a clean re-subscription.
     fn resubscribe_all(&self) {
-        // Collect all subscribed assets
-        let assets: Vec<String> = self
-            .subscribed_assets
-            .iter()
-            .map(|r| r.key().clone())
-            .collect();
+        // Collect all unique assets and markets from active subscriptions
+        let mut assets: HashSet<String> = HashSet::new();
+        let mut markets: HashSet<String> = HashSet::new();
 
+        for entry in self.active_subs.iter() {
+            match &entry.value().target {
+                SubscriptionTarget::Assets(a) => assets.extend(a.iter().cloned()),
+                SubscriptionTarget::Markets(m) => markets.extend(m.iter().cloned()),
+            }
+        }
+
+        // Re-subscribe to market assets
         if !assets.is_empty() {
+            let assets_vec: Vec<String> = assets.into_iter().collect();
             #[cfg(feature = "tracing")]
-            tracing::debug!(count = assets.len(), "Re-subscribing to market assets");
-            let request = SubscriptionRequest::market(assets);
+            tracing::debug!(count = assets_vec.len(), "Re-subscribing to market assets");
+
+            // Rebuild subscribed_assets tracking
+            for asset in &assets_vec {
+                self.subscribed_assets.insert(asset.clone(), 1);
+            }
+
+            let request = SubscriptionRequest::market(assets_vec);
             if let Err(e) = self.connection.send(&request) {
                 #[cfg(feature = "tracing")]
                 tracing::warn!(%e, "Failed to re-subscribe to market channel");
@@ -158,31 +178,35 @@ impl SubscriptionManager {
             }
         }
 
-        // Store auth for re-subscription on reconnect.
+        // Re-subscribe to user markets (requires auth)
         // We can recover from poisoned lock because Option<Credentials> has no inconsistent intermediate state.
         let auth = self
             .last_auth
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        if let Some(auth) = auth {
-            let markets: Vec<String> = self
-                .subscribed_markets
-                .iter()
-                .map(|r| r.key().clone())
-                .collect();
 
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                markets_count = markets.len(),
-                "Re-subscribing to user channel"
-            );
-            let request = SubscriptionRequest::user(markets);
-            if let Err(e) = self.connection.send_authenticated(&request, &auth) {
+        if let Some(auth) = auth {
+            if !markets.is_empty() {
+                let markets_vec: Vec<String> = markets.into_iter().collect();
                 #[cfg(feature = "tracing")]
-                tracing::warn!(%e, "Failed to re-subscribe to user channel");
-                #[cfg(not(feature = "tracing"))]
-                let _ = &e;
+                tracing::debug!(
+                    markets_count = markets_vec.len(),
+                    "Re-subscribing to user channel"
+                );
+
+                // Rebuild subscribed_markets tracking
+                for market in &markets_vec {
+                    self.subscribed_markets.insert(market.clone(), 1);
+                }
+
+                let request = SubscriptionRequest::user(markets_vec);
+                if let Err(e) = self.connection.send_authenticated(&request, &auth) {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(%e, "Failed to re-subscribe to user channel");
+                    #[cfg(not(feature = "tracing"))]
+                    let _ = &e;
+                }
             }
         }
     }
