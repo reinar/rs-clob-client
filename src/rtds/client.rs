@@ -232,6 +232,14 @@ impl<S: State> Client<S> {
     pub fn subscription_count(&self) -> usize {
         self.inner.subscriptions.subscription_count()
     }
+
+    /// Shut down the WebSocket connection and all background tasks.
+    ///
+    /// Signals the connection loop and reconnection handler to exit.
+    /// Safe to call multiple times.
+    pub fn shutdown(&self) {
+        self.inner.connection.shutdown();
+    }
 }
 
 impl Client<Authenticated<Normal>> {

@@ -100,6 +100,8 @@ where
     sender_tx: mpsc::UnboundedSender<String>,
     /// Broadcast sender for incoming messages
     broadcast_tx: broadcast::Sender<M>,
+    /// Shutdown signal — when set to `true`, connection loop and reconnection handler exit
+    shutdown_tx: watch::Sender<bool>,
     /// Phantom data for unused type parameters
     _phantom: PhantomData<P>,
 }
@@ -118,6 +120,7 @@ where
         let (sender_tx, sender_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let (state_tx, state_rx) = watch::channel(ConnectionState::Disconnected);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         // Spawn connection task
         let connection_config = config;
@@ -133,6 +136,7 @@ where
                 broadcast_tx_clone,
                 parser,
                 state_tx_clone,
+                shutdown_rx,
             )
             .await;
         });
@@ -142,6 +146,7 @@ where
             state_rx,
             sender_tx,
             broadcast_tx,
+            shutdown_tx,
             _phantom: PhantomData,
         })
     }
@@ -154,11 +159,20 @@ where
         broadcast_tx: broadcast::Sender<M>,
         parser: P,
         state_tx: watch::Sender<ConnectionState>,
+        shutdown_rx: watch::Receiver<bool>,
     ) {
         let mut attempt = 0_u32;
         let mut backoff: backoff::ExponentialBackoff = config.reconnect.clone().into();
 
         loop {
+            // Check if shutdown was requested
+            if *shutdown_rx.borrow() {
+                #[cfg(feature = "tracing")]
+                tracing::debug!("Shutdown requested, stopping connection loop");
+                _ = state_tx.send(ConnectionState::Disconnected);
+                break;
+            }
+
             // Check if ConnectionManager was dropped (all sender_tx instances gone)
             if sender_rx.is_closed() {
                 #[cfg(feature = "tracing")]
@@ -422,5 +436,16 @@ where
     #[must_use]
     pub fn state_receiver(&self) -> watch::Receiver<ConnectionState> {
         self.state_tx.subscribe()
+    }
+
+    /// Shut down the connection and all background tasks.
+    ///
+    /// Signals the connection loop and reconnection handler to exit.
+    /// Safe to call multiple times.
+    pub fn shutdown(&self) {
+        // Signal shutdown — connection loop checks this at the top of each iteration
+        _ = self.shutdown_tx.send(true);
+        // Signal Disconnected — reconnection handler exits on this state
+        _ = self.state_tx.send(ConnectionState::Disconnected);
     }
 }

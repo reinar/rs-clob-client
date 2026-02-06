@@ -385,6 +385,17 @@ impl<S: State> Client<S> {
     pub fn unsubscribe_midpoints(&self, asset_ids: &[U256]) -> Result<()> {
         self.unsubscribe_orderbook(asset_ids)
     }
+
+    /// Shut down all WebSocket connections and background tasks.
+    ///
+    /// Signals all active channels to stop their connection loops and
+    /// reconnection handlers. Safe to call multiple times.
+    pub fn shutdown(&self) {
+        for entry in self.inner.channels.iter() {
+            entry.value().connection.shutdown();
+        }
+        self.inner.channels.clear();
+    }
 }
 
 // Methods only available for authenticated clients
